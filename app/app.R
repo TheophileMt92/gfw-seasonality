@@ -1,7 +1,7 @@
 library(shiny)
 library(bslib)
 library(dplyr)
-library(ggplot2)
+library(plotly)
 library(leaflet)
 
 seasonality  <- readRDS("data/seasonality.rds")
@@ -33,6 +33,9 @@ area_choices <- setNames(areas, lbl)
 month_names <- c("January", "February", "March", "April", "May", "June",
                  "July", "August", "September", "October", "November", "December")
 
+palette8 <- c("#1B9E77", "#D95F02", "#7570B3", "#E7298A",
+              "#66A61E", "#E6AB02", "#A6761D", "#666666")
+
 ui <- page_sidebar(
   title = "Who fishes where, and when: global fishing effort in 2020",
   theme = bs_theme(version = 5, preset = "flatly"),
@@ -55,7 +58,7 @@ ui <- page_sidebar(
   ),
   card(
     card_header(textOutput("season_title", inline = TRUE)),
-    plotOutput("season_plot", height = "320px")
+    plotlyOutput("season_plot", height = "340px")
   ),
   card(
     card_header(textOutput("map_title", inline = TRUE)),
@@ -94,14 +97,16 @@ server <- function(input, output, session) {
     paste0("Weekly fishing effort by fleet: ", area_label())
   })
 
-  output$season_plot <- renderPlot({
+  output$season_plot <- renderPlotly({
     req(input$flags)
     w <- area_season() |>
       filter(flag %in% input$flags) |>
       group_by(flag, week) |>
-      summarise(hours = sum(fishing_hours), .groups = "drop")
-    if (!nrow(w)) return(NULL)
+      summarise(hours = sum(fishing_hours), .groups = "drop") |>
+      arrange(flag, week)
+    validate(need(nrow(w) > 0, "No effort recorded for this selection."))
 
+    # Order the legend by peak week so the seasonal sequence reads in order
     ord <- w |>
       group_by(flag) |>
       summarise(peak = week[which.max(hours)], .groups = "drop") |>
@@ -109,13 +114,22 @@ server <- function(input, output, session) {
       pull(flag)
     w$flag <- factor(w$flag, levels = ord)
 
-    ggplot(w, aes(week, hours, colour = flag)) +
-      geom_line(linewidth = 0.9) +
-      scale_x_continuous(breaks = seq(1, 53, 8)) +
-      scale_colour_brewer(palette = "Dark2", name = NULL) +
-      labs(x = "Week of 2020", y = "Fishing hours") +
-      theme_minimal(base_size = 13) +
-      theme(legend.position = "bottom", panel.grid.minor = element_blank())
+    w$tip <- paste0("<b>", w$flag, "</b><br>Week ", w$week, "<br>",
+                    format(round(w$hours), big.mark = ","), " fishing hours")
+
+    plot_ly(w, x = ~week, y = ~hours, color = ~flag,
+            colors = palette8[seq_len(nlevels(w$flag))],
+            type = "scatter", mode = "lines",
+            line = list(width = 2),
+            text = ~tip, hoverinfo = "text") |>
+      layout(
+        xaxis = list(title = "Week of 2020", dtick = 8, zeroline = FALSE),
+        yaxis = list(title = "Fishing hours", rangemode = "tozero"),
+        hovermode = "closest",
+        legend = list(orientation = "h", x = 0, y = -0.18),
+        margin = list(t = 20, r = 10)
+      ) |>
+      config(displayModeBar = FALSE)
   })
 
   output$map_title <- renderText({
