@@ -6,6 +6,7 @@ library(leaflet)
 
 seasonality  <- readRDS("data/seasonality.rds")
 grid_monthly <- readRDS("data/grid_monthly.rds")
+fao_bnd      <- readRDS("data/fao_boundaries.rds")
 
 # Drop flags that could not be resolved from the MMSI prefix
 seasonality  <- filter(seasonality,  !grepl("^MID ", flag))
@@ -39,8 +40,9 @@ ui <- page_sidebar(
     width = 320,
     selectInput("area", "FAO major fishing area",
                 choices = area_choices, selected = 34),
-    sliderInput("n_flags", "Number of fleets shown", min = 3, max = 10,
-                value = 6, step = 1, ticks = FALSE),
+    selectizeInput("flags", "Fleets (annual fishing hours)",
+                   choices = NULL, multiple = TRUE,
+                   options = list(placeholder = "Select flag states")),
     sliderInput("month", "Month mapped", min = 1, max = 12, value = 1, step = 1,
                 animate = animationOptions(interval = 900, loop = TRUE),
                 ticks = FALSE),
@@ -48,7 +50,8 @@ ui <- page_sidebar(
     p(class = "text-muted small",
       "Apparent fishing effort from AIS, Global Fishing Watch (2020), ",
       "0.1 degree daily grid. Flag state is derived from the MMSI prefix, so ",
-      "vessels with unresolved prefixes are excluded.")
+      "vessels with unresolved prefixes are excluded. Fleets under 100 hours ",
+      "a year in an area are not listed.")
   ),
   card(
     card_header(textOutput("season_title", inline = TRUE)),
@@ -71,13 +74,20 @@ server <- function(input, output, session) {
     filter(seasonality, fao_area == as.integer(input$area))
   })
 
-  top_flags <- reactive({
-    area_season() |>
+  # Repopulate the fleet selector when the area changes, ranked by effort
+  observeEvent(input$area, {
+    ranked <- area_season() |>
       group_by(flag) |>
       summarise(h = sum(fishing_hours), .groups = "drop") |>
-      arrange(desc(h)) |>
-      head(input$n_flags) |>
-      pull(flag)
+      filter(h >= 100) |>
+      arrange(desc(h))
+
+    choices <- setNames(
+      ranked$flag,
+      paste0(ranked$flag, "  (", format(round(ranked$h), big.mark = ","), " h)")
+    )
+    updateSelectizeInput(session, "flags", choices = choices,
+                         selected = head(ranked$flag, 6), server = TRUE)
   })
 
   output$season_title <- renderText({
@@ -85,8 +95,9 @@ server <- function(input, output, session) {
   })
 
   output$season_plot <- renderPlot({
+    req(input$flags)
     w <- area_season() |>
-      filter(flag %in% top_flags()) |>
+      filter(flag %in% input$flags) |>
       group_by(flag, week) |>
       summarise(hours = sum(fishing_hours), .groups = "drop")
     if (!nrow(w)) return(NULL)
@@ -108,23 +119,38 @@ server <- function(input, output, session) {
   })
 
   output$map_title <- renderText({
-    paste0("Fishing effort in ", month_names[input$month], " 2020: ", area_label())
+    n <- length(input$flags)
+    paste0("Fishing effort in ", month_names[input$month], " 2020: ",
+           area_label(),
+           if (n) paste0(" (", n, " fleet", if (n > 1) "s" else "", ")") else "")
   })
 
+  # Base map: outline the selected FAO area and zoom to its full extent
   output$map <- renderLeaflet({
-    g <- filter(grid_monthly, fao_area == as.integer(input$area))
-    leaflet() |>
-      addProviderTiles("CartoDB.DarkMatter") |>
-      fitBounds(min(g$lon), min(g$lat), max(g$lon), max(g$lat))
+    b <- filter(fao_bnd, fao_area == as.integer(input$area))
+    m <- leaflet() |>
+      addProviderTiles("Esri.OceanBasemap") |>
+      fitBounds(min(b$lon), min(b$lat), max(b$lon), max(b$lat))
+    for (r in unique(b$ring)) {
+      rr <- b[b$ring == r, ]
+      m <- addPolylines(m, lng = rr$lon, lat = rr$lat,
+                        color = "#1f4e5f", weight = 1.5, opacity = 0.9,
+                        fill = FALSE)
+    }
+    m
   })
 
+  # Effort layer, redrawn on month or fleet change
   observe({
+    req(input$flags)
     g <- grid_monthly |>
-      filter(fao_area == as.integer(input$area), month == input$month) |>
+      filter(fao_area == as.integer(input$area),
+             month == input$month,
+             flag %in% input$flags) |>
       group_by(lat, lon) |>
       summarise(hours = sum(fishing_hours), .groups = "drop")
 
-    proxy <- leafletProxy("map") |> clearShapes()
+    proxy <- leafletProxy("map") |> clearGroup("effort")
     if (!nrow(g)) return(invisible(NULL))
 
     pal <- colorNumeric("YlOrRd", domain = log10(g$hours + 1))
@@ -133,7 +159,8 @@ server <- function(input, output, session) {
         lng1 = g$lon, lat1 = g$lat,
         lng2 = g$lon + 0.5, lat2 = g$lat + 0.5,
         fillColor = pal(log10(g$hours + 1)),
-        fillOpacity = 0.75, weight = 0,
+        fillOpacity = 0.8, weight = 0,
+        group = "effort",
         label = paste0(round(g$hours), " fishing hours")
       )
   })
