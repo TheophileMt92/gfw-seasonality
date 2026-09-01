@@ -5,3 +5,6 @@ raw/
 .DS_Store
 renv/library/
 renv/staging/
+renv/
+.Rprofile
+renv.lock
