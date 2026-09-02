@@ -12,6 +12,10 @@ fao_bnd      <- readRDS("data/fao_boundaries.rds")
 seasonality  <- filter(seasonality,  !grepl("^MID ", flag))
 grid_monthly <- filter(grid_monthly, !grepl("^MID ", flag))
 
+# The pipeline aggregates to ISO week, so recover an approximate start date for
+# each week. ISO week 1 of 2020 began on 30 December 2019.
+seasonality$date <- as.Date("2019-12-30") + (seasonality$week - 1) * 7
+
 fao_names <- c(
   "18" = "18 - Arctic Sea",            "21" = "21 - Atlantic, Northwest",
   "27" = "27 - Atlantic, Northeast",   "31" = "31 - Atlantic, W Central",
@@ -46,6 +50,9 @@ ui <- page_sidebar(
     selectizeInput("flags", "Fleets (annual fishing hours)",
                    choices = NULL, multiple = TRUE,
                    options = list(placeholder = "Select flag states")),
+    radioButtons("view", "Effort shown as",
+                 choices = c("Weekly" = "weekly", "Cumulative" = "cumulative"),
+                 selected = "weekly", inline = TRUE),
     sliderInput("month", "Month mapped", min = 1, max = 12, value = 1, step = 1,
                 animate = animationOptions(interval = 900, loop = TRUE),
                 ticks = FALSE),
@@ -101,7 +108,7 @@ server <- function(input, output, session) {
     req(input$flags)
     w <- area_season() |>
       filter(flag %in% input$flags) |>
-      group_by(flag, week) |>
+      group_by(flag, week, date) |>
       summarise(hours = sum(fishing_hours), .groups = "drop") |>
       arrange(flag, week)
     validate(need(nrow(w) > 0, "No effort recorded for this selection."))
@@ -114,17 +121,29 @@ server <- function(input, output, session) {
       pull(flag)
     w$flag <- factor(w$flag, levels = ord)
 
-    w$tip <- paste0("<b>", w$flag, "</b><br>Week ", w$week, "<br>",
-                    format(round(w$hours), big.mark = ","), " fishing hours")
+    # Cumulative view: running total per fleet. Legend order is still set by
+    # the weekly peak above, computed before the transform.
+    cumulative <- identical(input$view, "cumulative")
+    if (cumulative) {
+      w <- w |> arrange(flag, week) |> group_by(flag) |>
+        mutate(hours = cumsum(hours)) |> ungroup()
+    }
 
-    plot_ly(w, x = ~week, y = ~hours, color = ~flag,
+    y_lab <- if (cumulative) "Cumulative fishing hours" else "Fishing hours"
+    w$tip <- paste0("<b>", w$flag, "</b><br>Week of ",
+                    format(w$date, "%d %B"), "<br>",
+                    format(round(w$hours), big.mark = ","), " fishing hours",
+                    if (cumulative) " to date" else "")
+
+    plot_ly(w, x = ~date, y = ~hours, color = ~flag,
             colors = palette8[seq_len(nlevels(w$flag))],
             type = "scatter", mode = "lines",
             line = list(width = 2),
             text = ~tip, hoverinfo = "text") |>
       layout(
-        xaxis = list(title = "Week of 2020", dtick = 8, zeroline = FALSE),
-        yaxis = list(title = "Fishing hours", rangemode = "tozero"),
+        xaxis = list(title = "2020", type = "date",
+                     tickformat = "%b", dtick = "M1", zeroline = FALSE),
+        yaxis = list(title = y_lab, rangemode = "tozero"),
         hovermode = "closest",
         legend = list(orientation = "h", x = 0, y = -0.18),
         margin = list(t = 20, r = 10)
