@@ -50,13 +50,26 @@ ui <- page_sidebar(
     selectizeInput("flags", "Fleets (annual fishing hours)",
                    choices = NULL, multiple = TRUE,
                    options = list(placeholder = "Select flag states")),
+    p(class = "text-muted small mb-3",
+      "Both panels below use this area and these fleets."),
+
+    hr(class = "my-2"),
+    tags$strong(class = "d-block mb-2 text-uppercase small", "Chart"),
     radioButtons("view", "Effort shown as",
                  choices = c("Weekly" = "weekly", "Cumulative" = "cumulative"),
                  selected = "weekly", inline = TRUE),
+
+    hr(class = "my-2"),
+    tags$strong(class = "d-block mb-2 text-uppercase small", "Map"),
     sliderInput("month", "Month mapped", min = 1, max = 12, value = 1, step = 1,
                 animate = animationOptions(interval = 900, loop = TRUE),
                 ticks = FALSE),
-    hr(),
+    radioButtons("map_view", "Effort shown as",
+                 choices = c("That month" = "single",
+                             "Cumulative to date" = "cumulative"),
+                 selected = "single"),
+
+    hr(class = "my-2"),
     p(class = "text-muted small",
       "Apparent fishing effort from AIS, Global Fishing Watch (2020), ",
       "0.1 degree daily grid. Flag state is derived from the MMSI prefix, so ",
@@ -153,8 +166,13 @@ server <- function(input, output, session) {
 
   output$map_title <- renderText({
     n <- length(input$flags)
-    paste0("Fishing effort in ", month_names[input$month], " 2020: ",
-           area_label(),
+    period <- if (identical(input$map_view, "cumulative")) {
+      if (input$month == 1) "January 2020"
+      else paste0("January to ", month_names[input$month], " 2020")
+    } else {
+      paste0(month_names[input$month], " 2020")
+    }
+    paste0("Fishing effort, ", period, ": ", area_label(),
            if (n) paste0(" (", n, " fleet", if (n > 1) "s" else "", ")") else "")
   })
 
@@ -176,9 +194,15 @@ server <- function(input, output, session) {
   # Effort layer, redrawn on month or fleet change
   observe({
     req(input$flags)
+    months_shown <- if (identical(input$map_view, "cumulative")) {
+      seq_len(input$month)
+    } else {
+      input$month
+    }
+
     g <- grid_monthly |>
       filter(fao_area == as.integer(input$area),
-             month == input$month,
+             month %in% months_shown,
              flag %in% input$flags) |>
       group_by(lat, lon) |>
       summarise(hours = sum(fishing_hours), .groups = "drop")
