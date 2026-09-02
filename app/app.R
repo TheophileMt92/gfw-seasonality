@@ -2,11 +2,13 @@ library(shiny)
 library(bslib)
 library(dplyr)
 library(plotly)
+library(ggplot2)
 library(leaflet)
 
 seasonality  <- readRDS("data/seasonality.rds")
 grid_monthly <- readRDS("data/grid_monthly.rds")
 fao_bnd      <- readRDS("data/fao_boundaries.rds")
+land         <- readRDS("data/land.rds")
 
 # Drop flags that could not be resolved from the MMSI prefix
 seasonality  <- filter(seasonality,  !grepl("^MID ", flag))
@@ -50,6 +52,10 @@ ui <- page_sidebar(
     selectizeInput("flags", "Fleets (annual fishing hours)",
                    choices = NULL, multiple = TRUE,
                    options = list(placeholder = "Select flag states")),
+    div(class = "d-flex gap-2 mb-2",
+        actionButton("all_flags", "Select all", class = "btn-sm btn-outline-secondary flex-fill"),
+        actionButton("top_flags", "Top 6", class = "btn-sm btn-outline-secondary flex-fill"),
+        actionButton("no_flags", "Clear", class = "btn-sm btn-outline-secondary flex-fill")),
     p(class = "text-muted small mb-3",
       "Both panels below use this area and these fleets."),
 
@@ -58,6 +64,8 @@ ui <- page_sidebar(
     radioButtons("view", "Effort shown as",
                  choices = c("Weekly" = "weekly", "Cumulative" = "cumulative"),
                  selected = "weekly", inline = TRUE),
+    p(class = "text-muted small mb-0",
+      "Use the camera icon on the chart to save it as PNG."),
 
     hr(class = "my-2"),
     tags$strong(class = "d-block mb-2 text-uppercase small", "Map"),
@@ -68,6 +76,8 @@ ui <- page_sidebar(
                  choices = c("That month" = "single",
                              "Cumulative to date" = "cumulative"),
                  selected = "single"),
+    checkboxInput("labels", "Country names on downloaded map", TRUE),
+    downloadButton("dl_map", "Download map (PNG)", class = "btn-sm w-100"),
 
     hr(class = "my-2"),
     p(class = "text-muted small",
@@ -97,20 +107,40 @@ server <- function(input, output, session) {
     filter(seasonality, fao_area == as.integer(input$area))
   })
 
-  # Repopulate the fleet selector when the area changes, ranked by effort
-  observeEvent(input$area, {
-    ranked <- area_season() |>
+  # Fleets present in the selected area, ranked by annual effort
+  ranked_flags <- reactive({
+    area_season() |>
       group_by(flag) |>
       summarise(h = sum(fishing_hours), .groups = "drop") |>
       filter(h >= 100) |>
       arrange(desc(h))
+  })
 
-    choices <- setNames(
-      ranked$flag,
-      paste0(ranked$flag, "  (", format(round(ranked$h), big.mark = ","), " h)")
-    )
-    updateSelectizeInput(session, "flags", choices = choices,
-                         selected = head(ranked$flag, 6), server = TRUE)
+  flag_choices <- reactive({
+    r <- ranked_flags()
+    setNames(r$flag,
+             paste0(r$flag, "  (", format(round(r$h), big.mark = ","), " h)"))
+  })
+
+  # Repopulate the fleet selector when the area changes
+  observeEvent(input$area, {
+    updateSelectizeInput(session, "flags", choices = flag_choices(),
+                         selected = head(ranked_flags()$flag, 6), server = TRUE)
+  })
+
+  observeEvent(input$all_flags, {
+    updateSelectizeInput(session, "flags", choices = flag_choices(),
+                         selected = ranked_flags()$flag, server = TRUE)
+  })
+
+  observeEvent(input$top_flags, {
+    updateSelectizeInput(session, "flags", choices = flag_choices(),
+                         selected = head(ranked_flags()$flag, 6), server = TRUE)
+  })
+
+  observeEvent(input$no_flags, {
+    updateSelectizeInput(session, "flags", choices = flag_choices(),
+                         selected = character(0), server = TRUE)
   })
 
   output$season_title <- renderText({
@@ -148,8 +178,12 @@ server <- function(input, output, session) {
                     format(round(w$hours), big.mark = ","), " fishing hours",
                     if (cumulative) " to date" else "")
 
+    n <- nlevels(w$flag)
+    cols <- if (n <= 8) palette8[seq_len(n)] else
+      grDevices::colorRampPalette(palette8)(n)
+
     plot_ly(w, x = ~date, y = ~hours, color = ~flag,
-            colors = palette8[seq_len(nlevels(w$flag))],
+            colors = cols,
             type = "scatter", mode = "lines",
             line = list(width = 2),
             text = ~tip, hoverinfo = "text") |>
@@ -161,7 +195,12 @@ server <- function(input, output, session) {
         legend = list(orientation = "h", x = 0, y = -0.18),
         margin = list(t = 20, r = 10)
       ) |>
-      config(displayModeBar = FALSE)
+      config(displaylogo = FALSE,
+             modeBarButtonsToRemove = c("select2d", "lasso2d", "autoScale2d",
+                                        "hoverClosestCartesian",
+                                        "hoverCompareCartesian"),
+             toImageButtonOptions = list(format = "png", scale = 2,
+                                         filename = "fishing_effort_chart"))
   })
 
   output$map_title <- renderText({
@@ -191,22 +230,40 @@ server <- function(input, output, session) {
     m
   })
 
-  # Effort layer, redrawn on month or fleet change
-  observe({
+  mapped_grid <- reactive({
     req(input$flags)
     months_shown <- if (identical(input$map_view, "cumulative")) {
       seq_len(input$month)
     } else {
       input$month
     }
-
-    g <- grid_monthly |>
+    cells <- grid_monthly |>
       filter(fao_area == as.integer(input$area),
              month %in% months_shown,
              flag %in% input$flags) |>
-      group_by(lat, lon) |>
+      group_by(lat, lon, flag) |>
       summarise(hours = sum(fishing_hours), .groups = "drop")
 
+    # Per-cell total, plus a breakdown of the top fleets in that cell
+    breakdown <- cells |>
+      arrange(lat, lon, desc(hours)) |>
+      group_by(lat, lon) |>
+      summarise(
+        hours = sum(hours),
+        detail = paste0(
+          paste0(head(flag, 5), ": ",
+                 format(round(head(hours, 5)), big.mark = ","), " h",
+                 collapse = "<br>"),
+          if (n() > 5) paste0("<br>+ ", n() - 5, " more") else ""
+        ),
+        .groups = "drop"
+      )
+    breakdown
+  })
+
+  # Effort layer, redrawn on month or fleet change
+  observe({
+    g <- mapped_grid()
     proxy <- leafletProxy("map") |> clearGroup("effort")
     if (!nrow(g)) return(invisible(NULL))
 
@@ -218,9 +275,75 @@ server <- function(input, output, session) {
         fillColor = pal(log10(g$hours + 1)),
         fillOpacity = 0.8, weight = 0,
         group = "effort",
-        label = paste0(round(g$hours), " fishing hours")
+        label = lapply(
+          paste0("<b>", format(round(g$hours), big.mark = ","),
+                 " fishing hours</b><br>", g$detail),
+          htmltools::HTML
+        ),
+        labelOptions = labelOptions(textsize = "12px", direction = "auto")
       )
   })
+  # Static map export: ggplot cropped to the FAO area bounding box
+  output$dl_map <- downloadHandler(
+    filename = function() {
+      paste0("fishing_effort_area", input$area, "_",
+             if (identical(input$map_view, "cumulative")) "jan_to_" else "",
+             tolower(month_names[input$month]), "_2020.png")
+    },
+    content = function(file) {
+      g <- mapped_grid()
+      b <- filter(fao_bnd, fao_area == as.integer(input$area))
+      xr <- range(b$lon); yr <- range(b$lat)
+
+      lnd <- filter(land, lon >= xr[1] - 5, lon <= xr[2] + 5,
+                          lat >= yr[1] - 5, lat <= yr[2] + 5)
+
+      # Label only the landmasses actually in view, ranked by how much of each
+      # is visible, so the map is not swamped by small or distant countries.
+      lab <- lnd |>
+        filter(lon >= xr[1], lon <= xr[2], lat >= yr[1], lat <= yr[2]) |>
+        group_by(country) |>
+        summarise(lon = mean(lon), lat = mean(lat), n = n(), .groups = "drop") |>
+        filter(n >= 8) |>
+        arrange(desc(n)) |>
+        head(12)
+
+      period <- if (identical(input$map_view, "cumulative")) {
+        if (input$month == 1) "January 2020"
+        else paste0("January to ", month_names[input$month], " 2020")
+      } else {
+        paste0(month_names[input$month], " 2020")
+      }
+
+      p <- ggplot() +
+        geom_tile(data = g, aes(lon + 0.25, lat + 0.25, fill = log10(hours + 1)),
+                  width = 0.5, height = 0.5) +
+        geom_polygon(data = lnd, aes(lon, lat, group = group),
+                     fill = "#2a2f36", colour = "#6b757e", linewidth = 0.25) +
+        {if (isTRUE(input$labels))
+          geom_text(data = lab, aes(lon, lat, label = country),
+                    colour = "grey72", size = 2.5, alpha = 0.9,
+                    check_overlap = TRUE)
+         else NULL} +
+        scale_fill_gradientn(
+          colours = c("#0b0724", "#3b0f70", "#8c2981", "#de4968",
+                      "#fe9f6d", "#fcfdbf"),
+          breaks = 0:4,
+          labels = c("1", "10", "100", "1,000", "10,000"),
+          name = "Fishing hours") +
+        coord_fixed(xlim = xr, ylim = yr, expand = FALSE) +
+        labs(title = paste0("Fishing effort, ", period),
+             subtitle = area_label(),
+             caption = "Apparent fishing effort from AIS, Global Fishing Watch (2020)",
+             x = NULL, y = NULL) +
+        theme_minimal(base_size = 13) +
+        theme(panel.background = element_rect(fill = "#0b0724", colour = NA),
+              panel.grid = element_blank(),
+              plot.caption = element_text(colour = "grey40", size = 8))
+
+      ggsave(file, p, width = 10, height = 7, dpi = 150, bg = "white")
+    }
+  )
 }
 
 shinyApp(ui, server)
