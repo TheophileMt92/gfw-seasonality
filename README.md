@@ -4,8 +4,7 @@ An interactive look at **when** different national fleets fish, and **where**, u
 Global Fishing Watch's 2020 apparent fishing effort data aggregated by FAO major
 fishing area.
 
-**[Open the app](https://theophilemt92.github.io/gfw-seasonality/)** — runs entirely
-in your browser, no server.
+**[Open the app](https://theophile-mouton.shinyapps.io/gfw-seasonality/)**
 
 ## What it shows
 
@@ -46,19 +45,24 @@ prep/
 app/
   app.R
   data/                    # the aggregated outputs (a few MB total)
-docs/                      # shinylive build, served by GitHub Pages
 ```
 
 To rebuild from scratch: download the GFW daily CSVs and the FAO polygons into
 `raw/`, then run the three prep scripts from the project root, then
-`shinylive::export("app", "docs")`.
+`shiny::runApp("app")`.
 
 ## Stack
 
-R, Shiny, plotly, leaflet, dplyr, ggplot2. Deployed as
-[shinylive](https://posit-dev.github.io/r-shinylive/) — the app is compiled to
-WebAssembly and runs client-side, so there is no server to pay for and no usage
-limit. First load pulls down the R runtime and takes a few seconds.
+R, Shiny, plotly, leaflet, dplyr, ggplot2. Hosted on shinyapps.io.
+
+A WebAssembly build (shinylive) was the original target, since it needs no server
+at all. It did not survive contact with the data: webR runs out of memory holding
+the monthly grid alongside the packages, and the only way through was to coarsen
+the map to 2° cells, which threw away the detail the map exists to show. Keeping
+the resolution and paying for a server was the better trade.
+
+The hosted app runs on the free tier, so it may hit its monthly quota. If the link
+is down, clone the repo and run `shiny::runApp("app")` locally.
 
 ## Caveats
 
