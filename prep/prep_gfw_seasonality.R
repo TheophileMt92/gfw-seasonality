@@ -119,8 +119,9 @@ keep <- paste(top_by_area$fao_area, top_by_area$flag)
 eff[, flag_map := fifelse(paste(fao_area, flag) %in% keep, flag, "Other")]
 
 grid <- eff[, .(fishing_hours = round(sum(fishing_hours), 1)),
-            by = .(lat = floor(cell_ll_lat), lon = floor(cell_ll_lon),
-                   fao_area, flag = flag_map, month)]
+            by = .(lat = floor(cell_ll_lat * 2) / 2,
+                   lon = floor(cell_ll_lon * 2) / 2,
+                   fao_area, flag, month)]
 
 # ---- write both as RDS (webR reads these without the arrow package) -----
 saveRDS(as.data.frame(seasonality), file.path(out_dir, "seasonality.rds"),
