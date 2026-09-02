@@ -8,3 +8,5 @@ renv/staging/
 renv/
 .Rprofile
 renv.lock
+docs/
+rsconnect/

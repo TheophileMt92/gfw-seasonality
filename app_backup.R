@@ -271,7 +271,7 @@ server <- function(input, output, session) {
     proxy |>
       addRectangles(
         lng1 = g$lon, lat1 = g$lat,
-        lng2 = g$lon + 1, lat2 = g$lat + 1,
+        lng2 = g$lon + 0.5, lat2 = g$lat + 0.5,
         fillColor = pal(log10(g$hours + 1)),
         fillOpacity = 0.8, weight = 0,
         group = "effort",
@@ -316,8 +316,8 @@ server <- function(input, output, session) {
       }
 
       p <- ggplot() +
-        geom_tile(data = g, aes(lon + 0.5, lat + 0.5, fill = log10(hours + 1)),
-                  width = 1, height = 1) +
+        geom_tile(data = g, aes(lon + 0.25, lat + 0.25, fill = log10(hours + 1)),
+                  width = 0.5, height = 0.5) +
         geom_polygon(data = lnd, aes(lon, lat, group = group),
                      fill = "#2a2f36", colour = "#6b757e", linewidth = 0.25) +
         {if (isTRUE(input$labels))

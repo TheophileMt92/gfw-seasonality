@@ -5,7 +5,7 @@
 # No vessel metadata file needed: the flag state is derived from the first
 # three digits of the MMSI (the Maritime Identification Digits, or MID).
 #
-# Run once locally, then build the app / figures from the two output files.
+# Run once locally from the project root.
 
 library(data.table)
 library(sf)
@@ -92,8 +92,7 @@ cells <- hits[cells, on = c("cell_ll_lat", "cell_ll_lon")]
 setnames(cells, "zone", "fao_area")
 cells[, geometry := NULL]
 
-# Cells just outside the 2005 polygons (coastlines, enclosed waters) fall back
-# to the nearest area rather than being dropped.
+# Cells just outside the 2005 polygons fall back to the nearest area.
 na_idx <- which(is.na(cells$fao_area))
 cat("cells with no direct match:", length(na_idx),
     sprintf("(%.1f%%)\n", 100 * length(na_idx) / nrow(cells)))
@@ -109,18 +108,29 @@ eff <- eff[!is.na(fao_area)]
 seasonality <- eff[, .(fishing_hours = round(sum(fishing_hours), 1),
                        vessels = sum(vessels)),
                    by = .(fao_area, flag, week)]
-write_parquet(seasonality, file.path(out_dir, "seasonality.parquet"),
-              compression = "zstd")
 
 # ---- output 2: coarse monthly grid for mapping --------------------------
+# This file ships to the browser, so it has to stay small: 1 degree cells,
+# and only the top 12 flags per area kept separately, the rest bucketed.
+top_by_area <- eff[, .(h = sum(fishing_hours)), by = .(fao_area, flag)][
+  order(fao_area, -h), head(.SD, 12), by = fao_area]
+
+keep <- paste(top_by_area$fao_area, top_by_area$flag)
+eff[, flag_map := fifelse(paste(fao_area, flag) %in% keep, flag, "Other")]
+
 grid <- eff[, .(fishing_hours = round(sum(fishing_hours), 1)),
-            by = .(lat = floor(cell_ll_lat * 2) / 2,
-                   lon = floor(cell_ll_lon * 2) / 2,
-                   fao_area, flag, month)]
-write_parquet(grid, file.path(out_dir, "grid_monthly.parquet"),
-              compression = "zstd")
+            by = .(lat = floor(cell_ll_lat), lon = floor(cell_ll_lon),
+                   fao_area, flag = flag_map, month)]
+
+# ---- write both as RDS (webR reads these without the arrow package) -----
+saveRDS(as.data.frame(seasonality), file.path(out_dir, "seasonality.rds"),
+        compress = "xz")
+saveRDS(as.data.frame(grid), file.path(out_dir, "grid_monthly.rds"),
+        compress = "xz")
 
 cat("seasonality:", nrow(seasonality), "rows,",
-    round(file.size(file.path(out_dir, "seasonality.parquet")) / 1e6, 1), "MB\n")
+    round(file.size(file.path(out_dir, "seasonality.rds")) / 1e6, 2), "MB\n")
 cat("grid:", nrow(grid), "rows,",
-    round(file.size(file.path(out_dir, "grid_monthly.parquet")) / 1e6, 1), "MB\n")
+    round(file.size(file.path(out_dir, "grid_monthly.rds")) / 1e6, 2), "MB\n")
+cat("Aim for the grid under ~150,000 rows. If it is larger, change\n",
+    "floor(cell_ll_lat) to floor(cell_ll_lat / 2) * 2 for 2 degree cells.\n")
